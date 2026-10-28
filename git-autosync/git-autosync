@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Commit and push changes in the given git repos once they have been quiet for QUIET seconds.
+# Usage: git-autosync REPO_DIR...
+set -u
+QUIET=${QUIET:-30}
+# Never auto-commit files that look like secrets.
+DENY='(^|/)(\.env[^/]*|.*\.(pem|key|p12|pfx)|.*credentials.*|.*secret.*|id_rsa.*)$'
+
+for repo in "$@"; do
+  cd "$repo" || { echo "skip $repo: not found"; continue; }
+  [ -n "$(git status --porcelain)" ] || continue
+
+  # still being written? wait for the next run
+  newest=$(git ls-files -mo --exclude-standard -z | xargs -0 -r stat -c %Y 2>/dev/null | sort -n | tail -1)
+  if [ -n "$newest" ] && [ $(( $(date +%s) - newest )) -lt "$QUIET" ]; then continue; fi
+
+  git add -A
+  bad=$(git diff --cached --name-only | grep -iE "$DENY" || true)
+  if [ -n "$bad" ]; then
+    echo "$repo: refusing to commit secret-looking files:"; echo "$bad"
+    git reset -q; continue
+  fi
+  [ -n "$(git diff --cached --name-only)" ] || continue
+
+  msg="Auto-sync: $(git diff --cached --name-status | head -5 | tr '\t\n' ' :' | sed 's/ *$//')"
+  git commit -q -m "$msg" && git push -q origin HEAD && echo "$repo: pushed ($msg)"
+done

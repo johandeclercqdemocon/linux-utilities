@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# Install gVisor (runsc) as an extra Docker runtime, or remove it again. See README.md.
+#
+#   ./install-gvisor --dry-run                 # download + verify + list what it would do; no root
+#   sudo ./install-gvisor                      # the release this was tested with (RELEASE below)
+#   sudo ./install-gvisor --release latest     # the newest release instead
+#   sudo ./install-gvisor --tarball FILE       # a gvisor.tar.zstd/.tar.bz2 already downloaded (FILE.sha512 next to it)
+#   sudo ./install-gvisor --uninstall          # remove the runtime and the files
+#   add --restart to restart Docker without asking
+set -euo pipefail
+
+RELEASE=20261019.0                         # tested on this laptop, 2026-10-24
+PREFIX=/usr/local/bin
+BUCKET=https://storage.googleapis.com/gvisor/releases/release
+DAEMON_JSON=/etc/docker/daemon.json
+
+dry=0 restart=0 uninstall=0 tarball=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dry-run) dry=1 ;;
+        --restart) restart=1 ;;
+        --uninstall) uninstall=1 ;;
+        --release) RELEASE="${2:?--release needs a value, e.g. latest or 20261019.0}"; shift ;;
+        --tarball) tarball="${2:?--tarball needs a file}"; shift ;;
+        -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+        *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+need_root() {
+    [ "$(id -u)" -eq 0 ] || { echo "this step changes the system: run it with sudo (or use --dry-run)" >&2; exit 1; }
+}
+
+# Restarting Docker stops every running container; only those with a restart policy come back.
+restart_docker() {
+    echo "running containers and their restart policy:"
+    local ids; ids=$(docker ps -q)
+    if [ -n "$ids" ]; then
+        docker inspect -f '  {{.Name}}  {{.HostConfig.RestartPolicy.Name}}' $ids
+        echo "  (policy \"no\": that container stays stopped after the restart)"
+    else
+        echo "  none"
+    fi
+    if [ "$restart" -eq 0 ]; then
+        read -r -p "restart Docker now? [y/N] " a
+        [ "$a" = y ] || [ "$a" = Y ] || { echo "not restarted: run 'sudo systemctl restart docker' yourself"; return 0; }
+    fi
+    systemctl restart docker
+    echo "Docker restarted"
+}
+
+if [ "$uninstall" -eq 1 ]; then
+    [ "$dry" -eq 1 ] && { echo "would run: runsc uninstall; remove $PREFIX/runsc, $PREFIX/containerd-shim-runsc-v1, $PREFIX/gvisor-bin; restart Docker"; exit 0; }
+    need_root
+    [ -x "$PREFIX/runsc" ] && "$PREFIX/runsc" uninstall --config_file "$DAEMON_JSON" || echo "no runsc runtime to remove"
+    rm -f "$PREFIX/runsc" "$PREFIX/containerd-shim-runsc-v1"
+    rm -rf "$PREFIX/gvisor-bin"
+    echo "files removed; $DAEMON_JSON stays (now without runsc)"
+    restart_docker
+    exit 0
+fi
+
+case "$(uname -m)" in
+    x86_64|aarch64) arch=$(uname -m) ;;
+    *) echo "gVisor has builds for x86_64 and aarch64 only, not $(uname -m)" >&2; exit 1 ;;
+esac
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+if [ -z "$tarball" ]; then
+    ext=tar.zstd; command -v zstd >/dev/null || ext=tar.bz2      # bzip2 is on every Ubuntu
+    url="$BUCKET/$RELEASE/$arch/gvisor.$ext"
+    echo "downloading $url"
+    curl -fSL --progress-bar -o "$work/gvisor.$ext" "$url"
+    curl -fsSL -o "$work/gvisor.$ext.sha512" "$url.sha512"
+    tarball="$work/gvisor.$ext"
+fi
+[ -f "$tarball.sha512" ] || { echo "no checksum file $tarball.sha512" >&2; exit 1; }
+# the .sha512 names the file without a path: check it from the file's own folder
+(cd "$(dirname "$tarball")" && sha512sum -c "$(basename "$tarball").sha512")
+
+mkdir "$work/x"
+case "$tarball" in
+    *.zstd) tar --zstd -xf "$tarball" -C "$work/x" ;;
+    *.bz2) tar -xjf "$tarball" -C "$work/x" ;;
+    *) echo "unknown archive type: $tarball" >&2; exit 1 ;;
+esac
+for f in runsc containerd-shim-runsc-v1 gvisor-bin; do
+    [ -e "$work/x/$f" ] || { echo "the archive has no $f: a release layout this script does not know" >&2; exit 1; }
+done
+version=$("$work/x/runsc" --version | head -1)
+echo "verified: $version"
+
+if [ "$dry" -eq 1 ]; then
+    echo "dry run, nothing changed. With sudo it would:"
+    echo "  install runsc and containerd-shim-runsc-v1 into $PREFIX, and gvisor-bin/ ($(ls "$work/x/gvisor-bin" | wc -l) helpers) into $PREFIX/gvisor-bin"
+    echo "  back up $DAEMON_JSON (if it exists), then: runsc install --download-sidecars=NEVER"
+    echo "  restart Docker (it asks first, unless --restart)"
+    exit 0
+fi
+
+need_root
+install -m 755 "$work/x/runsc" "$work/x/containerd-shim-runsc-v1" "$PREFIX/"
+install -d "$PREFIX/gvisor-bin"
+install -m 755 "$work/x/gvisor-bin/"* "$PREFIX/gvisor-bin/"
+echo "installed $version into $PREFIX"
+[ -f "$DAEMON_JSON" ] && cp "$DAEMON_JSON" "$DAEMON_JSON.bak-gvisor-$(date +%Y%m%d-%H%M%S)" && echo "backed up $DAEMON_JSON"
+"$PREFIX/runsc" install --download-sidecars=NEVER
+restart_docker
+echo "next: $(dirname "$0")/check-gvisor"

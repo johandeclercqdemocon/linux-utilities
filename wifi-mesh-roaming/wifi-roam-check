@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# wifi-roam-check — show Wi-Fi roaming and IP-address losses per boot, the current access point,
+# and a short packet-loss test. Read-only; changes nothing.
+#
+# Usage: wifi-roam-check [BOOTS] [PING_SECONDS]     (defaults: 6 boots, 30 s)
+set -u
+BOOTS=${1:-6}
+SECS=${2:-30}
+IFACE=$(nmcli -t -f DEVICE,TYPE,STATE dev | awk -F: '$2=="wifi" && $3=="connected"{print $1; exit}')
+[ -z "$IFACE" ] && { echo "No connected Wi-Fi interface."; exit 1; }
+CON=$(nmcli -t -f GENERAL.CONNECTION dev show "$IFACE" | cut -d: -f2-)
+GW=$(ip -4 route show default dev "$IFACE" | awk '{print $3; exit}')
+
+echo "== $IFACE on '$CON', gateway $GW"
+echo "   locked band:  $(nmcli -g 802-11-wireless.band con show "$CON" | sed 's/^$/(none)/')"
+echo "   locked BSSID: $(nmcli -g 802-11-wireless.bssid con show "$CON" | sed 's/\\//g; s/^$/(none)/')"
+echo
+echo "== Access points for this SSID (* = in use)"
+printf "%-7s %-18s %-5s %-9s %s\n" IN-USE BSSID CHAN FREQ SIGNAL
+nmcli -t -f IN-USE,BSSID,SSID,CHAN,FREQ,SIGNAL dev wifi list ifname "$IFACE" \
+  | sed 's/\\:/-/g' | awk -F: -v s="$(nmcli -g 802-11-wireless.ssid con show "$CON")" \
+    '$3==s {gsub("-",":",$2); printf "%-7s %-18s %-5s %-9s %s\n", $1, $2, $4, $5, $6}'
+echo
+echo "== Per boot: roams (switch to another AP) and IPv4 address losses on $IFACE"
+for ((b = -(BOOTS - 1); b <= 0; b++)); do
+  day=$(journalctl -b "$b" --no-pager -o short-iso -n1 2>/dev/null | cut -c1-10)
+  [ -z "$day" ] && continue
+  roams=$(journalctl -k -b "$b" --no-pager 2>/dev/null | grep -c -E "$IFACE: (disconnect from AP .* for new auth|Connection to AP .* lost)")
+  losses=$(journalctl -b "$b" --no-pager 2>/dev/null | grep -c -E "Withdrawing address record for [0-9.]+ on $IFACE\\.")
+  printf "   boot %3s  last entry %s  %4d roams  %2d address losses\n" "$b" "$day" "$roams" "$losses"
+done
+echo
+echo "== Packet loss over ${SECS}s (router and 1.1.1.1, in parallel)"
+n=$((SECS * 2))
+ping -q -c "$n" -i 0.5 "$GW" 2>&1 | grep -E 'packet loss|rtt' | sed "s/^/   router:   /" &
+ping -q -c "$n" -i 0.5 1.1.1.1 2>&1 | grep -E 'packet loss|rtt' | sed "s/^/   internet: /"
+wait

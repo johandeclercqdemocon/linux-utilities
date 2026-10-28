@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Check that Docker runs containers in gVisor, and what works inside. Changes nothing; no root.
+#
+#   ./check-gvisor                 # with debian:12-slim (Docker pulls it if it is not here)
+#   ./check-gvisor IMAGE           # with your own image; bwrap and unshare are tested if it has them
+set -uo pipefail
+image="${1:-debian:12-slim}"
+fail=0
+
+if command -v runsc >/dev/null; then
+    echo "runsc:        $(runsc --version | head -1)"
+else
+    echo "runsc:        NOT FOUND on PATH"; fail=1
+fi
+if docker info --format '{{range $k, $v := .Runtimes}}{{$k}} {{end}}' | grep -qw runsc; then
+    echo "Docker:       runsc is a runtime (the default stays $(docker info --format '{{.DefaultRuntime}}'))"
+else
+    echo "Docker:       runsc is NOT a runtime: run install-gvisor, then restart Docker"; exit 1
+fi
+
+# One container, two runtimes: what the same probe reports under runc and under runsc.
+probe='
+echo "kernel:       $(uname -r)"
+dmesg 2>/dev/null | head -1 | sed "s/^/dmesg:        /"
+if command -v bwrap >/dev/null; then
+    bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp -- true 2>/dev/null \
+        && echo "bwrap:        works" || echo "bwrap:        fails"
+else
+    echo "bwrap:        not in this image"
+fi
+if command -v unshare >/dev/null; then
+    unshare -rn true 2>/dev/null && echo "unshare -rn:  works" || echo "unshare -rn:  fails"
+fi
+if command -v python3 >/dev/null; then
+    python3 -c "import socket; socket.create_connection((\"1.1.1.1\", 443), timeout=5)" 2>/dev/null \
+        && echo "network:      yes" || echo "network:      no"
+fi'
+for rt in runc runsc; do
+    echo "--- $image, --runtime=$rt"
+    out=$(docker run --rm --runtime="$rt" --entrypoint sh "$image" -c "$probe" 2>&1) || { echo "$out"; fail=1; continue; }
+    echo "$out"
+    if [ "$rt" = runsc ] && ! grep -q "Starting gVisor" <<<"$out"; then
+        echo "NOT gVisor: dmesg does not say \"Starting gVisor\""; fail=1
+    fi
+done
+[ "$fail" -eq 0 ] && echo "OK: containers with --runtime=runsc run in gVisor" || echo "FAILED (see above)"
+exit "$fail"

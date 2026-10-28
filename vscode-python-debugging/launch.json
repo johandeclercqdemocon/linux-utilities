@@ -1,0 +1,48 @@
+{
+  // Copy into <project>/.vscode/launch.json, or merge the "configurations"
+  // entries into the one you already have.
+  //
+  // Assumes run_module.py sits at <project>/scripts/run_module.py. If you put
+  // it somewhere else, change "module" to match — it is a dotted path from the
+  // project root, so scripts/run_module.py is "scripts.run_module".
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // Always debugs the same entry point, whichever file has focus. Edit
+      // "module" once per thing you are working on.
+      "name": "Module: the one I am working on",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "yourpackage.yourmodule",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      // Let the debugger step into library code. The default of true makes it
+      // run straight past the call you wanted to watch.
+      "justMyCode": false
+    },
+    {
+      // Debugs whatever is open, as a module rather than as a script. See
+      // README.md for why "program": "${file}" is the wrong way to write this.
+      "name": "File: the one I am looking at",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "scripts.run_module",
+      "args": ["${file}"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      // Runs pytest on the open file, under the debugger. Breakpoints work in
+      // the test and in the code it calls.
+      "name": "Tests: the file I am looking at",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["${file}", "-q"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    }
+  ]
+}

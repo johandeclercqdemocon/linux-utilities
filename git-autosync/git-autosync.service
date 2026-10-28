@@ -1,0 +1,6 @@
+[Unit]
+Description=Auto commit and push my_recipes and utilities
+
+[Service]
+Type=oneshot
+ExecStart=%h/claude/utilities/git-autosync/git-autosync %h/claude/my_recipes %h/claude/utilities
